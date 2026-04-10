@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Dino Run 🦕</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #F5EEE6;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #5a4a42;
+    user-select: none;
+  }
+
+  #wrapper { width: 800px; max-width: 95vw; }
+
+  #scorebar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    font-size: 16px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    padding: 4px 0;
+    color: #9e8a82;
+  }
+  #scorebar #cur     { color: #5a4a42; }
+  #scorebar .hi-label{ color: #E6A4B4; }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 150px;
+    background: #F5EEE6;
+  }
+
+  #msgbox {
+    text-align: center;
+    padding: 14px 0 0;
+    min-height: 90px;
+  }
+
+  #press-msg {
+    font-size: 20px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: #5a4a42;
+  }
+
+  #over-msg {
+    font-size: 20px;
+    font-weight: bold;
+    letter-spacing: 5px;
+    color: #5a4a42;
+    display: none;
+  }
+
+  #hints {
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: #b8a49c;
+    margin-top: 5px;
+    min-height: 18px;
+  }
+
+  #restart-btn {
+    margin-top: 10px;
+    background: #E6A4B4;
+    border: none;
+    border-radius: 6px;
+    color: white;
+    font-size: 22px;
+    width: 44px;
+    height: 44px;
+    cursor: pointer;
+    box-shadow: 0 3px 0 #c97a90;
+    display: none;
+    transition: transform .1s;
+  }
+  #restart-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 #c97a90; }
+</style>
+</head>
+<body>
+<div id="wrapper">
+  <div id="scorebar">
+    <span class="hi-label">HI</span>
+    <span id="hi">00000</span>
+    <span id="cur">00000</span>
+  </div>
+  <canvas id="c" height="150"></canvas>
+  <div id="msgbox">
+    <p id="press-msg">Press <strong>Space</strong> or tap to play</p>
+    <p id="over-msg">G A M E &nbsp; O V E R</p>
+    <p id="hints"></p>
+    <button id="restart-btn" title="Restart">&#x21BA;</button>
+  </div>
+</div>
+
+<script>
+(function(){
+
+  /* ─── DOM ─────────────────────────────────────────── */
+  var canvas  = document.getElementById('c');
+  var ctx     = canvas.getContext('2d');
+  var hiEl    = document.getElementById('hi');
+  var curEl   = document.getElementById('cur');
+  var pressEl = document.getElementById('press-msg');
+  var overEl  = document.getElementById('over-msg');
+  var hintsEl = document.getElementById('hints');
+  var rstBtn  = document.getElementById('restart-btn');
+
+  /* ─── Canvas (HiDPI / retina aware) ──────────────── */
+  var W = 800, H = 150;
+  var DPR = window.devicePixelRatio || 1;
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(DPR, DPR);
+
+  /* ─── Palette ─────────────────────────────────────── */
+  var BG      = '#F5EEE6';
+  var DINO_C  = '#E6A4B4';
+  var GROUND  = '#c5b0a8';
+  var CACTUS  = '#9e8a82';
+  var CLOUD_C = '#ddd0c8';
+  var BIRD_C  = '#9e8a82';
+
+  /* ─── Layout ──────────────────────────────────────── */
+  var GY      = 118;   // ground y
+  var DX      = 70;    // dino x (fixed)
+  var DW      = 40;    // dino width  – standing
+  var DH      = 48;    // dino height – standing
+  var DW_DUCK = 56;    // dino width  – ducking
+  var DH_DUCK = 26;    // dino height – ducking
+  var BIRD_Y  = 58;    // bird top y  (standing dino top = GY-DH = 70 → HIT; duck top = GY-DH_DUCK = 92 → SAFE)
+  var BIRD_H  = 22;
+  var BIRD_W  = 38;
+
+  /* ─────────────────────────────────────────────────────
+     SPEED  –  all in px / second  (device-independent)
+     BASE_SPEED = 720 px/s  ≈  12 px/frame @ 60 fps
+     Change this one number to make the whole game faster/slower.
+  ───────────────────────────────────────────────────── */
+  var BASE_SPEED = 720;   // ← easy tuning knob  (≈ 9 px/frame @ 60 fps)
+  var MAX_SPEED  = 1200;  // ≈ 20 px/frame @ 60 fps
+
+  /* ─── Physics  (px/s  and  px/s²) ─────────────────── */
+  // Original values were per-frame @60fps:
+  //   GRAVITY 0.55 px/f²  →  0.55 × 60² = 1980 px/s²
+  //   JUMP_V  -12  px/f   → -12  × 60   = -720 px/s
+  var GRAVITY = 2800;   // px / s²  – increased for snappier arc
+  var JUMP_V  = -580;   // px / s  (upward) – reduced for lower jump
+
+  /* ─── State ───────────────────────────────────────── */
+  var status;   // 'idle' | 'running' | 'dead'
+  var score, hiScore, speed;
+  var dino, obstacles, clouds, gOffset;
+  var distTravelled;   // total px scrolled since game start
+  var nextSpawnDist;   // distTravelled value at which to spawn next obstacle
+  var lastPhase, phaseFlashSec;  // seconds remaining for banner
+  var duckHeld;
+  var legTimer;   // seconds since last leg switch
+  var lastTime;   // timestamp of previous rAF tick (ms)
+  hiScore = 0;
+
+  /* ─── Helpers ─────────────────────────────────────── */
+  function pad(n){ return String(Math.floor(n)).padStart(5,'0'); }
+
+  function getPhase(){
+    if(score < 200) return 1;
+    return 3;  // 200+ = mixed
+  }
+
+  function dinoCurH(){ return (dino.ducking && dino.onGround) ? DH_DUCK : DH; }
+  function dinoCurW(){ return (dino.ducking && dino.onGround) ? DW_DUCK : DW; }
+  function dinoCurY(){ return (dino.ducking && dino.onGround) ? GY - DH_DUCK : dino.y; }
+
+  /* ─── Reset ───────────────────────────────────────── */
+  function reset(){
+    status         = 'idle';
+    score          = 0;
+    speed          = BASE_SPEED;
+    gOffset        = 0;
+    distTravelled     = 0;
+    nextSpawnDist     = 300 + Math.random() * 100;   // first obstacle after 300–400 px of travel
+    lastPhase      = 1;
+    phaseFlashSec  = 0;
+    duckHeld       = false;
+    legTimer       = 0;
+    lastTime       = null;
+    dino = { y: GY - DH, vy: 0, onGround: true, leg: 0, ducking: false };
+    obstacles = [];
+    clouds = [
+      { x: 150, y: 28, w: 80 },
+      { x: 450, y: 18, w: 60 },
+      { x: 680, y: 35, w: 50 }
+    ];
+    curEl.textContent     = '00000';
+    pressEl.style.display = 'block';
+    overEl.style.display  = 'none';
+    rstBtn.style.display  = 'none';
+    hintsEl.textContent   = '';
+  }
+
+  /* ─── Input ───────────────────────────────────────── */
+  function startJump(){
+    if(status === 'idle'){
+      status = 'running';
+      pressEl.style.display = 'none';
+      updateHints(1);
+      dino.vy = JUMP_V;
+      dino.onGround = false;
+      return;
+    }
+    if(status === 'running' && dino.onGround && !dino.ducking){
+      dino.vy = JUMP_V;
+      dino.onGround = false;
+      return;
+    }
+    if(status === 'dead'){
+      reset();
+      status = 'running';
+      pressEl.style.display = 'none';
+      updateHints(1);
+      dino.vy = JUMP_V;
+      dino.onGround = false;
+    }
+  }
+
+  function startDuck(){
+    if(status !== 'running') return;
+    duckHeld = true;
+    if(dino.onGround){
+      dino.ducking = true;
+      dino.y = GY - DH_DUCK;
+    } else {
+      if(dino.vy < 0) dino.vy = 60;   // fast-fall (px/s)
+    }
+  }
+
+  function endDuck(){
+    duckHeld = false;
+    if(dino.ducking){
+      dino.ducking = false;
+      dino.y = GY - DH;
+    }
+  }
+
+  /* ─── Spawning ────────────────────────────────────── */
+  function calcGap(){
+    var roll = Math.random();
+    if(roll < 0.30) return 300 + Math.random() * 20;   // short  30%: 300–320 px
+    if(roll < 0.80) return 400 + Math.random() * 80;   // medium 50%: 400–480 px
+    return              480 + Math.random() * 120;      // long   20%: 480–600 px
+  }
+
+  function spawnCactus(){
+    var count = Math.random() < 0.30 ? (Math.random()<0.5?2:3) : 1;  // fewer multi-cactus
+    var bw = 16, igap = 7;
+    var bh = Math.floor(28 + Math.random()*18);
+    var obsW = count*bw + (count-1)*igap;
+    nextSpawnDist = distTravelled + calcGap();
+    obstacles.push({
+      type: 'cactus',
+      x: W + 20, y: GY - bh,
+      w: obsW, h: bh,
+      count: count, bw: bw, gap: igap
+    });
+  }
+
+  function spawnBird(){
+    var yOff = Math.floor(Math.random()*10) - 4;
+    nextSpawnDist = distTravelled + calcGap();
+    obstacles.push({
+      type: 'bird',
+      x: W + 20, y: BIRD_Y + yOff,
+      w: BIRD_W, h: BIRD_H,
+      wingTime: 0   // accumulated seconds for wing animation
+    });
+  }
+
+  function spawnObstacle(){
+    var phase = getPhase();
+    if(phase === 1){
+      spawnCactus();
+    } else if(phase === 2){
+      spawnBird();
+    } else {
+      // Phase 3: alternate types to keep it fair
+      var last = obstacles.length ? obstacles[obstacles.length-1] : null;
+      if(!last)                        { spawnCactus(); }
+      else if(last.type === 'cactus')  { spawnBird();   }
+      else                             { spawnCactus(); }
+    }
+  }
+
+  /* ─── Collision ───────────────────────────────────── */
+  function hits(ob){
+    var m = 5;
+    var dy = dinoCurY(), dh = dinoCurH(), dw = dinoCurW();
+    return DX+m      < ob.x+ob.w-m &&
+           DX+dw-m   > ob.x+m      &&
+           dy+m      < ob.y+ob.h   &&
+           dy+dh     > ob.y+m;
+  }
+
+  /* ─── Phase change ────────────────────────────────── */
+  function checkPhaseChange(){
+    var phase = getPhase();
+    if(phase !== lastPhase){
+      obstacles      = [];
+      // First obstacle of new phase spawns after a generous breathing-room gap
+      nextSpawnDist     = distTravelled + 300 + Math.random() * 100;
+      phaseFlashSec  = 0;
+      lastPhase      = phase;
+      updateHints(phase);
+    }
+  }
+
+  function updateHints(phase){
+    if(phase === 1) hintsEl.textContent = 'SPACE / ↑ — jump';
+    else            hintsEl.textContent = 'SPACE / ↑ — jump    ↓ / B — duck';
+  }
+
+  /* ─── Update  (dt in seconds) ─────────────────────── */
+  function update(dt){
+    if(status !== 'running') return;
+
+    // ── Score & speed ────────────────────────────────
+    // score += speed * dt * 0.02  reproduces original feel:
+    //   old: score += 5 * 0.02 per frame @ 60fps → 6 pts/s
+    //   new: score += 300 * 0.02 * dt            → 6 pts/s ✓
+    score += speed * dt * 0.02;
+    speed  = Math.min(BASE_SPEED + Math.floor(score/100) * 60, MAX_SPEED);
+
+    curEl.textContent = pad(score);
+    if(Math.floor(score) > hiScore){
+      hiScore = Math.floor(score);
+      hiEl.textContent = pad(hiScore);
+    }
+
+    checkPhaseChange();
+    if(phaseFlashSec > 0) phaseFlashSec -= dt;
+
+    // ── Ground scroll ────────────────────────────────
+    var dx = speed * dt;
+    gOffset = (gOffset + dx) % W;
+    distTravelled += dx;
+
+    // ── Dino physics ─────────────────────────────────
+    if(!dino.onGround){
+      // Apply 1.9x stronger gravity on the way down to cut hang time
+      // (jump height is unchanged — only the fall is faster)
+      var gravMult = dino.vy > 0 ? 1.9 : 1.0;
+      dino.vy += GRAVITY * gravMult * dt;
+      dino.y  += dino.vy * dt;
+    }
+    if(dino.y >= GY - DH){
+      dino.y        = GY - DH;
+      dino.vy       = 0;
+      dino.onGround = true;
+      if(duckHeld){ dino.ducking = true; dino.y = GY - DH_DUCK; }
+    }
+
+    // ── Leg animation ────────────────────────────────
+    // Switch leg pose every 0.1 s  (original: every 6 frames @ 60fps)
+    if(!dino.ducking){
+      legTimer += dt;
+      if(legTimer >= 0.1){ legTimer = 0; dino.leg = 1 - dino.leg; }
+    }
+
+    // ── Spawn check ──────────────────────────────────
+    if(distTravelled >= nextSpawnDist){
+      spawnObstacle();
+    }
+
+    // ── Move obstacles ───────────────────────────────
+    for(var i = obstacles.length-1; i >= 0; i--){
+      obstacles[i].x -= speed * dt;
+      if(obstacles[i].type === 'bird') obstacles[i].wingTime += dt;
+      if(hits(obstacles[i])){ die(); return; }
+      if(obstacles[i].x + obstacles[i].w < -20) obstacles.splice(i,1);
+    }
+
+    // ── Clouds ───────────────────────────────────────
+    for(var j=0; j<clouds.length; j++){
+      clouds[j].x -= speed * 0.25 * dt;
+      if(clouds[j].x + clouds[j].w < 0){
+        clouds[j].x = W + Math.random()*100;
+        clouds[j].y = 10 + Math.random()*40;
+        clouds[j].w = 40 + Math.random()*70;
+      }
+    }
+  }
+
+  function die(){
+    status = 'dead';
+    overEl.style.display = 'block';
+    rstBtn.style.display = 'inline-block';
+    hintsEl.textContent  = '';
+  }
+
+  /* ─── Draw helpers ────────────────────────────────── */
+  function rect(x,y,w,h,r){
+    r = r||0;
+    if(w<=0||h<=0) return;
+    if(r===0){ ctx.fillRect(x,y,w,h); return; }
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,  x+w,y+r,  r);
+    ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+    ctx.lineTo(x+r,y+h);   ctx.arcTo(x,  y+h,x,  y+h-r,r);
+    ctx.lineTo(x,y+r);     ctx.arcTo(x,  y,  x+r,y,    r);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawGround(){
+    ctx.fillStyle = GROUND;
+    ctx.fillRect(0, GY, W, 2);
+    var sp = 38;
+    for(var i=0; i<=Math.ceil(W/sp)+1; i++){
+      var dx = ((i*sp - gOffset)%W + W)%W;
+      ctx.fillRect(dx,        GY+4, 5, 2);
+      ctx.fillRect((dx+18)%W, GY+8, 3, 2);
+    }
+  }
+
+  function drawCloud(c){
+    ctx.fillStyle = CLOUD_C;
+    var h = c.w * 0.32;
+    rect(c.x,           c.y+h*0.5,  c.w,      h,      h/2);
+    rect(c.x+c.w*0.2,  c.y,         c.w*0.45, h*1.2,  h*0.55);
+    rect(c.x+c.w*0.55, c.y+h*0.15,  c.w*0.38, h,      h*0.5);
+  }
+
+  function drawDinoStanding(dead){
+    var x = DX, y = dino.y;
+    ctx.fillStyle = DINO_C;
+    rect(x+2,  y+10, 34, 26, 4);
+    rect(x+12, y,    24, 20, 4);
+    rect(x+28, y+7,   9,  9, 3);
+    rect(x-2,  y+22, 12,  9, 3);
+    rect(x-8,  y+26, 10,  7, 3);
+    rect(x+18, y+26,  9,  5, 2);
+    ctx.fillStyle = '#fff';
+    rect(x+26, y+3, 7, 7, 2);
+    ctx.fillStyle = dead ? '#c97a90' : '#5a4a42';
+    rect(x+29, y+5, 3, 3, 1);
+    ctx.fillStyle = DINO_C;
+    if(!dead){
+      if(dino.leg===0){ rect(x+8, y+34,9,16,3); rect(x+22,y+34,9,10,3); }
+      else             { rect(x+8, y+34,9,10,3); rect(x+22,y+34,9,16,3); }
+    } else {
+      rect(x+8, y+34,9,14,3); rect(x+22,y+34,9,14,3);
+    }
+  }
+
+  function drawDinoDucking(){
+    var x = DX - 8, y = GY - DH_DUCK;
+    ctx.fillStyle = DINO_C;
+    rect(x,    y+6,  52, 18, 4);
+    rect(x+32, y,    20, 16, 4);
+    rect(x+46, y+5,   8,  8, 3);
+    rect(x-4,  y+10, 10,  8, 3);
+    rect(x+10, y+20,  9,  8, 3);
+    rect(x+26, y+20,  9,  8, 3);
+    ctx.fillStyle = '#fff';
+    rect(x+44, y+3, 6, 6, 2);
+    ctx.fillStyle = '#5a4a42';
+    rect(x+47, y+5, 3, 3, 1);
+  }
+
+  function drawDino(dead){
+    if(dino.ducking && dino.onGround && !dead) drawDinoDucking();
+    else drawDinoStanding(dead);
+  }
+
+  function drawCactus(ob){
+    ctx.fillStyle = CACTUS;
+    for(var i=0; i<ob.count; i++){
+      var cx = ob.x + i*(ob.bw+ob.gap);
+      rect(cx+3, ob.y, ob.bw-6, ob.h, 3);
+      if(ob.h > 36){
+        var ay = ob.y + Math.floor(ob.h*0.3);
+        var ah = Math.floor(ob.h*0.28);
+        rect(cx-5,       ay, 8, ah, 3); rect(cx-5,       ay, 8, 5, 2);
+        rect(cx+ob.bw-3, ay, 8, ah, 3); rect(cx+ob.bw-3, ay, 8, 5, 2);
+      }
+    }
+  }
+
+  function drawBird(ob){
+    ctx.fillStyle = BIRD_C;
+    var x = ob.x, y = ob.y;
+    // Wing flap every 0.15 s  (original ~10 frames @ 60fps)
+    var wf = Math.floor(ob.wingTime / 0.15) % 2;
+    rect(x+8,  y+6,  22, 12, 4);   // body
+    rect(x+28, y+9,  10,  5, 2);   // beak
+    rect(x,    y+9,  12,  5, 2);   // tail
+    rect(x+2,  y+13,  8,  4, 2);
+    if(wf === 0){
+      rect(x+10, y,   20, 8, 3);
+      rect(x+14, y-4, 12, 6, 3);
+    } else {
+      rect(x+10, y+14, 20, 8, 3);
+      rect(x+14, y+20, 12, 5, 3);
+    }
+    ctx.fillStyle = '#fff';
+    rect(x+24, y+7, 5, 5, 2);
+    ctx.fillStyle = '#5a4a42';
+    rect(x+26, y+9, 2, 2, 1);
+  }
+
+  function drawPhaseBanner(){ /* banners removed */ }
+
+  /* ─── Draw frame ──────────────────────────────────── */
+  function draw(){
+    ctx.fillStyle = BG;
+    ctx.fillRect(0,0,W,H);
+    for(var i=0;i<clouds.length;i++)    drawCloud(clouds[i]);
+    drawGround();
+    for(var i=0;i<obstacles.length;i++){
+      if(obstacles[i].type==='cactus') drawCactus(obstacles[i]);
+      else                              drawBird(obstacles[i]);
+    }
+    drawDino(status==='dead');
+    drawPhaseBanner();
+  }
+
+  /* ─── Game loop  (delta-time) ─────────────────────── */
+  function loop(timestamp){
+    if(lastTime === null){
+      // First tick: just record time, draw idle frame, no movement
+      lastTime = timestamp;
+      draw();
+      requestAnimationFrame(loop);
+      return;
+    }
+
+    // Cap dt at 50 ms (handles tab-switch lag without teleporting obstacles)
+    var dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+    lastTime = timestamp;
+
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  /* ─── Keyboard ────────────────────────────────────── */
+  document.addEventListener('keydown', function(e){
+    if(e.code==='Space'||e.key===' '||e.code==='ArrowUp'){
+      e.preventDefault(); startJump();
+    }
+    if((e.code==='ArrowDown'||e.key==='ArrowDown'||e.key==='b'||e.key==='B') && !e.repeat){
+      e.preventDefault(); startDuck();
+    }
+  });
+  document.addEventListener('keyup', function(e){
+    if(e.code==='ArrowDown'||e.key==='ArrowDown'||e.key==='b'||e.key==='B') endDuck();
+  });
+
+  canvas.addEventListener('click', startJump);
+  canvas.addEventListener('touchstart', function(e){
+    e.preventDefault(); startJump();
+  }, {passive:false});
+
+  rstBtn.addEventListener('click', function(e){
+    e.stopPropagation();
+    reset();
+    status = 'running';
+    pressEl.style.display = 'none';
+    updateHints(1);
+    dino.vy = JUMP_V;
+    dino.onGround = false;
+  });
+
+  /* ─── Boot ────────────────────────────────────────── */
+  reset();
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
